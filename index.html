@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>EcoLens Live</title>
+<style>
+*{box-sizing:border-box}body{font-family:system-ui,sans-serif;max-width:900px;margin:0 auto;padding:16px;background:#f4f8f5;color:#12301f}
+h1{margin:0}.sub{color:#456;margin:4px 0 16px}.card{background:#fff;border-radius:12px;padding:14px;margin:12px 0;box-shadow:0 1px 4px #0002}
+button,.btn{background:#1b8a4b;color:#fff;border:0;border-radius:8px;padding:12px 16px;font-size:16px;cursor:pointer;display:inline-block;text-decoration:none;margin:4px 4px 4px 0}
+.alt{background:#456}.row{display:flex;gap:10px;flex-wrap:wrap}.row>*{flex:1;min-width:130px}
+.m{background:#e8f5ec;border-radius:10px;padding:10px;text-align:center}.m b{display:block;font-size:22px}
+canvas{width:100%;border-radius:10px}table{width:100%;border-collapse:collapse;font-size:13px}td,th{padding:6px;border-bottom:1px solid #ddd;text-align:left}
+.bar{height:26px;border-radius:6px;margin:4px 0;color:#fff;padding:3px 8px;font-size:13px;white-space:nowrap}
+label.fx{display:block;padding:6px 0}input,select{padding:8px;font-size:15px}.hide{display:none}.err{color:#b00020}
+</style></head><body>
+<h1>🌿 EcoLens Live</h1>
+<div class="sub">Snap a room. AI finds the energy waste, then shows the ₹ and CO₂ you can save.</div>
+
+<div class="card">
+  <div class="row">
+    <select id="state"></select>
+    <label>₹ per unit <input id="tariff" type="number" step="0.5" style="width:80px"></label>
+  </div>
+  <p>
+    <label class="btn">📷 Take photo<input id="cam" type="file" accept="image/*" capture="environment" hidden></label>
+    <label class="btn alt">🖼️ Upload<input id="up" type="file" accept="image/*" hidden></label>
+    <button id="scan">🔍 Scan</button>
+    <button id="demo" class="alt hide">Demo</button>
+  </p>
+  <div id="status"></div>
+</div>
+
+<div id="out" class="hide">
+  <div class="card"><canvas id="cv"></canvas></div>
+  <div class="row" id="metrics"></div>
+  <div class="card"><h3>🛠️ Future Home: tick the fixes</h3><div id="fixes"></div><div id="trees" style="font-size:22px"></div></div>
+  <div class="card"><h3>Monthly cost of detected items</h3><div id="bars"></div></div>
+  <div class="card" style="overflow-x:auto"><h3>📋 Action plan (fastest payback first)</h3><table id="tbl"></table></div>
+  <div class="card" id="carbon"></div>
+  <a id="wa" class="btn" target="_blank">📲 Share on WhatsApp</a>
+  <div class="card"><b>💡 Schemes to explore (verify current rules)</b><br>PM Surya Ghar: Muft Bijli Yojana (rooftop solar subsidy), pmsuryaghar.gov.in<br>BEE star labels: pick 5-star appliances, beeindia.gov.in</div>
+</div>
+
+<script>
+const GRID=0.7, WH_PER_1K=0.3; // CARBON BADGE IS A ROUGH ESTIMATE
+const TARIFFS={"India average":8,"Karnataka":7,"Delhi":6,"Maharashtra":9,"Tamil Nadu":6,"Telangana":7,"Gujarat":6,"Uttar Pradesh":7,"West Bengal":8,"Rajasthan":8}; // approx, verify
+const FIXES={tube_to_led:["Swap tube light for LED batten",.55,350],bulb_to_led:["Swap bulb for LED",.85,100],fan_to_bldc:["Swap old fan for BLDC fan",.6,3000],ac_to_inverter:["Upgrade to 5-star inverter AC",.4,35000],ac_tune_up:["Service AC, set to 24-26 C",.2,600],standby_cut:["Smart plug / switch off at wall",.9,300],geyser_timer:["Add a geyser timer",.3,500],lights_off:["Switch off when not in use",.5,0]};
+const DEMO=[{item:"Old tube lights",issue:"40W tubes, inefficient",fix_type:"tube_to_led",quantity:3,watts_each:40,hours_per_day:8,box_2d:[40,100,160,500]},{item:"Split AC",issue:"Old non-inverter AC",fix_type:"ac_to_inverter",quantity:1,watts_each:1500,hours_per_day:6,box_2d:[120,520,300,950]},{item:"TV + set-top box",issue:"Always on standby",fix_type:"standby_cut",quantity:1,watts_each:12,hours_per_day:18,box_2d:[450,80,700,420]},{item:"Ceiling fan",issue:"Old 75W fan",fix_type:"fan_to_bldc",quantity:2,watts_each:75,hours_per_day:10,box_2d:[330,560,520,900]}];
+const $=id=>document.getElementById(id); let file=null, rows=[], img=null, tokens=0, cached=false; const cache=new Map();
+
+const st=$("state"); for(const k in TARIFFS) st.add(new Option(k,k));
+st.onchange=()=>{$("tariff").value=TARIFFS[st.value]; if(rows.length) update()}; $("tariff").value=8; $("tariff").oninput=()=>rows.length&&update();
+if(new URLSearchParams(location.search).get("demo")==="1") $("demo").classList.remove("hide"); // demo button only with ?demo=1
+for(const id of ["cam","up"]) $(id).onchange=e=>{file=e.target.files[0]; $("status").textContent=file?("Photo ready: "+file.name):""};
+
+function resize(f){return new Promise((ok,bad)=>{const im=new Image();im.onload=()=>{const s=Math.min(1,1024/Math.max(im.width,im.height)),c=document.createElement("canvas");c.width=im.width*s;c.height=im.height*s;c.getContext("2d").drawImage(im,0,0,c.width,c.height);ok(c.toDataURL("image/jpeg",.8))};im.onerror=bad;im.src=URL.createObjectURL(f)})}
+function loadImg(src){return new Promise(ok=>{const i=new Image();i.onload=()=>ok(i);i.src=src})}
+
+$("scan").onclick=async()=>{
+  if(!file){$("status").innerHTML='<span class="err">Take or upload a photo first.</span>';return}
+  $("status").textContent="Scanning for energy waste..."; $("scan").disabled=true;
+  try{
+    const url=await resize(file), b64=url.split(",")[1]; img=await loadImg(url);
+    if(cache.has(b64)){rows=cache.get(b64);tokens=0;cached=true}
+    else{const r=await fetch("/api/scan",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({image:b64})});
+      const j=await r.json(); if(!r.ok) throw new Error(j.error||"Scan failed"); rows=j.findings; tokens=j.tokens; cached=false; cache.set(b64,rows)}
+    show(); $("status").textContent="";
+  }catch(e){$("status").innerHTML='<span class="err">Scan failed: '+e.message+'</span>'}
+  $("scan").disabled=false};
+
+$("demo").onclick=()=>{const c=document.createElement("canvas");c.width=900;c.height=600;const x=c.getContext("2d");x.fillStyle="#dfe8e2";x.fillRect(0,0,900,600);x.fillStyle="#000";x.fillText("DEMO ROOM",20,24);
+  loadImg(c.toDataURL()).then(i=>{img=i;rows=DEMO;tokens=1500;cached=false;show()})};
+
+function calc(){const t=+$("tariff").value||8;return rows.map((f,i)=>{const [label,fr,uc]=FIXES[f.fix_type]||FIXES.lights_off,q=Math.max(1,Math.min(+f.quantity||1,20)),kwh=(+f.watts_each||0)*q*(+f.hours_per_day||0)*30/1000,sv=kwh*fr,rs=sv*t,cost=uc*q;
+  return {n:i+1,item:f.item||"?",issue:f.issue||"",label,now:Math.round(kwh*t),rs:Math.round(rs),co2:+(sv*GRID).toFixed(1),cost,pay:rs>0?+(cost/rs).toFixed(1):null,kwh,sv,box:f.box_2d}}).sort((a,b)=>(a.pay==null)-(b.pay==null)||a.pay-b.pay)}
+
+function show(){const R=calc(); if(!R.length){$("status").textContent="No obvious waste found. Try another angle.";return}
+  $("out").classList.remove("hide");
+  $("fixes").innerHTML=R.map(r=>`<label class="fx"><input type="checkbox" checked data-n="${r.n}"> ${r.n}. ${r.label} (saves ₹${r.rs}/mo, payback ${r.pay??"-"} mo)</label>`).join("");
+  $("fixes").onchange=update; update(); $("out").scrollIntoView({behavior:"smooth"})}
+
+function update(){const R=calc(), on=new Set([...document.querySelectorAll("#fixes input:checked")].map(i=>+i.dataset.n)), t=+$("tariff").value||8;
+  if(!$("fixes").children.length||$("fixes").children.length!==R.length){show();return}
+  const sel=R.filter(r=>on.has(r.n)), before=R.reduce((a,r)=>a+r.kwh,0), all=R.reduce((a,r)=>a+r.sv,0), s=sel.reduce((a,r)=>a+r.sv,0);
+  const rsY=Math.round(s*t*12), co2Y=Math.round(s*GRID*12), score=x=>before?Math.round(100*(1-(all-x)/before)):100;
+  $("metrics").innerHTML=`<div class="m"><b>₹${rsY.toLocaleString("en-IN")}</b>saved / year</div><div class="m"><b>${co2Y} kg</b>CO₂ cut / year</div><div class="m"><b>${score(s)}/100</b>Green Score</div><div class="m"><b>${(co2Y/21).toFixed(1)} 🌳</b>trees equivalent</div>`;
+  $("trees").textContent="🌳".repeat(Math.min(40,Math.floor(co2Y/21)))||"Tick a fix to grow your forest";
+  const b=before*t, a=b-s*t, mx=Math.max(b,1);
+  $("bars").innerHTML=`<div class="bar" style="width:100%;background:#c0392b">Before: ₹${Math.round(b)}/mo</div><div class="bar" style="width:${Math.max(25,a/mx*100)}%;background:#1b8a4b">After: ₹${Math.round(a)}/mo</div>`;
+  $("tbl").innerHTML="<tr><th>#</th><th>Item</th><th>Fix</th><th>Saves ₹/mo</th><th>CO₂ kg/mo</th><th>Cost ₹</th><th>Payback (mo)</th></tr>"+R.map(r=>`<tr><td>${r.n}</td><td>${r.item}</td><td>${r.label}</td><td>${r.rs}</td><td>${r.co2}</td><td>${r.cost}</td><td>${r.pay??"-"}</td></tr>`).join("");
+  const g=cached?0:tokens/1000*WH_PER_1K*GRID;
+  $("carbon").textContent=`🌱 This scan used about ${g.toFixed(2)} g CO₂ (rough estimate: ${tokens} tokens, image shrunk to 1024px${cached?", cached result":""}).`;
+  $("wa").href="https://wa.me/?text="+encodeURIComponent(`My EcoLens audit: I can save ₹${rsY.toLocaleString("en-IN")}/year and ${co2Y} kg CO2/year. Green Score ${score(s)}/100.`);
+  const cv=$("cv"),x=cv.getContext("2d"); cv.width=img.width; cv.height=img.height; x.drawImage(img,0,0);
+  R.forEach(r=>{const bx=r.box; if(!Array.isArray(bx)||bx.length!==4)return; const [y1,x1,y2,x2]=bx.map(Number), W=cv.width/1000, H=cv.height/1000;
+    x.strokeStyle="#ff4b4b";x.lineWidth=Math.max(3,cv.width/200);x.strokeRect(x1*W,y1*H,(x2-x1)*W,(y2-y1)*H);
+    const txt=`${r.n}. ${r.item}: ₹${r.rs*12}/yr`;x.font=`bold ${Math.max(14,cv.width/45)}px sans-serif`;x.fillStyle="#ff4b4b";x.fillRect(x1*W,y1*H,x.measureText(txt).width+10,Math.max(14,cv.width/45)+10);x.fillStyle="#fff";x.fillText(txt,x1*W+5,y1*H+Math.max(14,cv.width/45)+1)})}
+</script></body></html>
