@@ -71,7 +71,7 @@ $("scan").onclick=async()=>{
   try{const url=await resize(file),b64=url.split(",")[1];img=await loadImg(url);
     if(cache.has(b64)){rows=cache.get(b64);tokens=0;cached=true}
     else{const r=await fetch("/api/scan",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({image:b64})});
-      const j=await r.json();if(!r.ok)throw new Error(j.error||"Scan failed");rows=j.findings;tokens=j.tokens;cached=false;cache.set(b64,rows)}
+      const raw=await r.text();let j;try{j=JSON.parse(raw)}catch(_){throw new Error("Server said: "+raw.slice(0,150))}if(!r.ok)throw new Error(j.error||"Scan failed");rows=j.findings;tokens=j.tokens;cached=false;cache.set(b64,rows)}
     $("status").textContent="";show()}catch(e){$("status").innerHTML='<span class="err">Scan failed: '+e.message+'</span>'}
   $("scan").disabled=false};
 $("demo").onclick=()=>{const c=document.createElement("canvas");c.width=900;c.height=600;const x=c.getContext("2d");x.fillStyle="#dfe8e2";x.fillRect(0,0,900,600);x.fillStyle="#000";x.fillText("DEMO ROOM",20,24);loadImg(c.toDataURL()).then(i=>{img=i;rows=DEMO;tokens=1500;cached=false;show()})};
