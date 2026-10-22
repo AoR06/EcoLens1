@@ -31,10 +31,10 @@ async function discover(key, primary) {
     const ok = (j.models || [])
       .filter(m => (m.supportedGenerationMethods || []).includes("generateContent") && /flash/i.test(m.name) && !/image|tts|live|audio|embed|robotics|computer|thinking|exp/i.test(m.name))
       .map(m => m.name.replace(/^models\//, ""));
-    ok.sort((a, b) => (/lite/i.test(a) - /lite/i.test(b)) || b.localeCompare(a));
-    for (const n of ok) if (!out.includes(n)) out.push(n);
+    const lite = ok.filter(n => /lite/i.test(n)).sort().reverse(), full = ok.filter(n => !/lite/i.test(n)).sort().reverse();
+    for (const n of [...lite, ...full]) if (!out.includes(n)) out.push(n);
   } catch (e) {}
-  return out.slice(0, 4);
+  return out.slice(0, 6);
 }
 
 module.exports = async (req, res) => {
@@ -46,14 +46,15 @@ module.exports = async (req, res) => {
   const primary = process.env.GEMINI_MODEL || "gemini-3.8-flash";
   const t0 = Date.now();
   let models = [primary];
+  const tries = [];
   try {
-    for (let i = 0; i < 6 && Date.now() - t0 < 30000; i++) {
+    for (let i = 0; i < 8 && Date.now() - t0 < 40000; i++) {
       const model = models[i % models.length];
       let r, j;
       try {
-        r = await call(model, key, image, { thinkingConfig: { thinkingLevel: "low" } }, 22000);
+        r = await call(model, key, image, { thinkingConfig: { thinkingLevel: "low" } }, 15000);
         j = await r.json();
-        if (!r.ok && /think/i.test(JSON.stringify(j))) { r = await call(model, key, image, {}, 22000); j = await r.json(); }
+        if (!r.ok && /think/i.test(JSON.stringify(j))) { r = await call(model, key, image, {}, 15000); j = await r.json(); }
       } catch (e) {
         if (e.name !== "AbortError") throw e;
         r = { ok: false, status: 504 }; j = { error: { message: "timeout" } };
@@ -62,12 +63,13 @@ module.exports = async (req, res) => {
         const txt = (j.candidates?.[0]?.content?.parts?.[0]?.text || "[]").replace(/```json|```/g, "").trim();
         return res.status(200).json({ findings: JSON.parse(txt), tokens: j.usageMetadata?.totalTokenCount || 1500, model });
       }
-      if (!BUSY(r, j)) return res.status(502).json({ error: (j.error && j.error.message) || "Gemini error" });
+      tries.push(model + " " + r.status + ": " + String((j.error && j.error.message) || "").slice(0, 60));
+      if (!BUSY(r, j)) return res.status(502).json({ error: (j.error && j.error.message) || "Gemini error", detail: tries.slice(-3).join(" | ") });
       if (models.length === 1) models = await discover(key, primary);
-      await sleep(1200);
+      await sleep(500);
     }
   } catch (e) {
     return res.status(500).json({ error: String(e.message || e) });
   }
-  return res.status(503).json({ error: "Google's AI is busy right now. Please wait a few seconds and tap Run Green Audit again." });
+  return res.status(503).json({ error: "Google's AI is busy right now. Please wait a few seconds and tap Run Green Audit again.", detail: tries.slice(-3).join(" | ") });
 };
